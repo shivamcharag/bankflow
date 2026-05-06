@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "PowerShell(gh repo view shivamcharag/bankflow --json defaultBranchRef,name 2>&1)",
-      "WebFetch(domain:api.github.com)"
-    ]
-  }
-}
