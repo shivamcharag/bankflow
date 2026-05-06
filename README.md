@@ -1,224 +1,251 @@
-# 🏦 BankFlow — Banking Microservices Platform
+# BankFlow
 
-A production-grade banking microservices system built with Spring Boot, Apache Kafka, PostgreSQL, and Docker.
+A microservices-based banking platform built with Spring Boot, Kafka, and PostgreSQL/MySQL.
 
-## 🏗️ Architecture
+---
+
+## Architecture Overview
+
 ```mermaid
-graph TD
-    Client([Client]) --> GW[API Gateway :8080\nSpring Security + JWT]
-    
-    GW --> AS[Account Service :8081\nPostgreSQL]
-    
-    AS -->|account-events| K[[Apache Kafka]]
-    AS -->|transaction-events| K
-    
-    K -->|account-events| TS[Transaction Service :8082\nMySQL]
-    K -->|transaction-events| NS[Notification Service :8083\nH2]
-    
-    AS --> PG[(PostgreSQL)]
-    TS --> MY[(MySQL)]
-    NS --> H2[(H2 In-Memory)]
-    
-    K --> KUI[Kafka UI :8090]
+graph TB
+    Client([Client / API Consumer])
+
+    subgraph Services["Microservices"]
+        AS["Account Service\n:8081\nSpring Boot 3.5"]
+        TS["Transaction Service\n:8082\nSpring Boot 3.5"]
+    end
+
+    subgraph Messaging["Event Streaming (Kafka :9092)"]
+        TE[transaction-events]
+        AE[account-events]
+        NE[notification-events]
+    end
+
+    subgraph Databases["Databases"]
+        PG[(PostgreSQL :5432\nbankflow_accounts)]
+        MY[(MySQL :3306\nbankflow_transactions)]
+    end
+
+    NS["Notification Service\n(future)"]
+    KUI["Kafka UI\n:8090"]
+    ZK["Zookeeper\n:2181"]
+
+    Client -->|REST| AS
+    Client -->|REST| TS
+
+    AS -->|reads / writes| PG
+    AS -->|publishes| TE
+    AS -->|publishes| AE
+
+    TE -->|consumes| TS
+    TS -->|reads / writes| MY
+    TS -->|publishes| NE
+
+    NE -.->|future consumer| NS
+
+    ZK --> Messaging
+    KUI --> Messaging
 ```
-## ✨ Features
 
-- **REST APIs** — Full CRUD for account management
-- **Event-Driven Architecture** — Kafka producers and consumers
-- **Security** — Spring Security + JWT authentication
-- **Database** — PostgreSQL with HikariCP connection pool
-- **Caching** — Redis L2 cache for account data
-- **Monitoring** — Spring Actuator health endpoints
-- **Containerized** — Full Docker Compose setup
-- **Exception Handling** — Global handler with consistent API responses
-- **Validation** — Bean validation on all request DTOs
+---
 
-## 🛠️ Tech Stack
+## Service Map
 
-| Technology | Version | Purpose |
+```mermaid
+graph LR
+    subgraph account-service["Account Service (port 8081)"]
+        AC[AccountController]
+        ASI[AccountServiceImpl]
+        AR[(AccountRepository)]
+        KP[KafkaProducer]
+        AC --> ASI --> AR
+        ASI --> KP
+    end
+
+    subgraph transaction-service["Transaction Service (port 8082)"]
+        TC[TransactionController]
+        TSI[TransactionServiceImpl]
+        TR[(TransactionRepository)]
+        KC[TransactionEventConsumer]
+        TC --> TSI --> TR
+        KC --> TSI
+    end
+
+    KP -->|transaction-events| KC
+```
+
+---
+
+## Data Flow: Deposit / Withdrawal
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant AS as Account Service
+    participant PG as PostgreSQL
+    participant K as Kafka
+    participant TS as Transaction Service
+    participant MY as MySQL
+
+    C->>AS: POST /api/v1/accounts/{id}/deposit
+    AS->>PG: Update balance (optimistic lock)
+    PG-->>AS: Updated Account
+    AS->>K: Publish TransactionEvent → transaction-events
+    AS-->>C: 200 OK — AccountResponse
+
+    K->>TS: Consume TransactionEvent
+    TS->>MY: Save Transaction record
+    TS->>K: Publish NotificationEvent → notification-events
+```
+
+---
+
+## Modules
+
+### Account Service
+
+| Layer | Key Classes |
+|---|---|
+| Controller | `AccountController` |
+| Service | `AccountServiceImpl` |
+| Entity | `Account` (`AccountType`, `AccountStatus`) |
+| Events | `TransactionEvent`, `AccountCreatedEvent` |
+| Security | JWT configured, disabled in dev |
+
+**REST Endpoints**
+
+| Method | Path | Description |
 |---|---|---|
-| Java | 21 | Core language |
-| Spring Boot | 3.5.13 | Application framework |
-| Apache Kafka | 3.9.2 | Event streaming |
-| PostgreSQL | 15 | Primary database |
-| HikariCP | 6.3.3 | Connection pooling |
-| Hibernate | 6.6.45 | ORM |
-| Docker | Latest | Containerization |
-| Lombok | 1.18.44 | Boilerplate reduction |
-| JWT (jjwt) | 0.11.5 | Authentication tokens |
+| `POST` | `/api/v1/accounts` | Create account |
+| `GET` | `/api/v1/accounts` | List all accounts |
+| `GET` | `/api/v1/accounts/{id}` | Get by ID |
+| `GET` | `/api/v1/accounts/number/{accountNumber}` | Get by account number |
+| `GET` | `/api/v1/accounts/status/{status}` | Filter by status |
+| `GET` | `/api/v1/accounts/balance?email=` | Get balance by email |
+| `POST` | `/api/v1/accounts/{id}/deposit` | Deposit funds |
+| `POST` | `/api/v1/accounts/{id}/withdraw` | Withdraw funds |
+| `PATCH` | `/api/v1/accounts/{id}/status` | Update account status |
+| `DELETE` | `/api/v1/accounts/{id}` | Close account (soft delete) |
 
-## 📁 Project Structure
-account-service/
-└── src/main/java/com/bankflow/account/
-├── config/          # Kafka, Security configuration
-├── controller/      # REST API endpoints
-├── service/         # Business logic interfaces
-│   └── impl/        # Service implementations
-├── repository/      # JPA repositories
-├── entity/          # Database entities
-├── dto/
-│   ├── request/     # Incoming request DTOs
-│   └── response/    # Outgoing response DTOs
-├── event/           # Kafka event classes
-├── exception/       # Custom exceptions + Global handler
-├── security/        # JWT utilities
-└── util/            # Helper classes
+**Database**: PostgreSQL `bankflow_accounts` — table `accounts`  
+**Kafka publishes**: `transaction-events`, `account-events`
 
-## 🚀 Quick Start
+---
 
-### Prerequisites
-- Java 21
-- Docker Desktop
-- Maven
+### Transaction Service
 
-### Run Infrastructure
+| Layer | Key Classes |
+|---|---|
+| Controller | `TransactionController` |
+| Service | `TransactionServiceImpl` |
+| Entity | `Transaction` (`TransactionType`, `TransactionStatus`) |
+| Consumer | `TransactionEventConsumer` |
+| Events | `NotificationEvent` |
+
+**REST Endpoints**
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/v1/transactions` | List all transactions |
+| `GET` | `/api/v1/transactions/{id}` | Get by ID |
+| `GET` | `/api/v1/transactions/account/{accountId}` | Transactions for account (UUID) |
+| `GET` | `/api/v1/transactions/account/number/{accountNumber}` | Transactions by account number |
+| `GET` | `/api/v1/transactions/type/{type}` | Filter by type |
+
+**Database**: MySQL `bankflow_transactions` — table `transactions`  
+**Kafka consumes**: `transaction-events`  
+**Kafka publishes**: `notification-events`
+
+---
+
+## Kafka Topics
+
+| Topic | Producer | Consumer | Purpose |
+|---|---|---|---|
+| `account-events` | Account Service | — | Account lifecycle events |
+| `transaction-events` | Account Service | Transaction Service | Deposit / withdrawal / transfer events |
+| `notification-events` | Transaction Service | Future notification service | Post-transaction notifications |
+
+All topics: 3 partitions, replication factor 1.
+
+---
+
+## Infrastructure
+
+```mermaid
+graph TB
+    subgraph docker["Docker Compose"]
+        PG[(PostgreSQL\n:5432)]
+        MY[(MySQL\n:3306)]
+        ZK[Zookeeper\n:2181]
+        KB[Kafka Broker\n:9092]
+        KUI[Kafka UI\n:8090]
+    end
+
+    ZK --> KB
+    KB --> KUI
+```
+
+Start all infrastructure:
+
 ```bash
 docker-compose up -d
 ```
 
-This starts:
-- PostgreSQL on port 5432
-- Apache Kafka on port 9092
-- Kafka UI on port 8090
-- Zookeeper (internal)
+---
 
-### Run Application
+## Getting Started
+
+### Prerequisites
+
+- Java 21
+- Docker & Docker Compose
+- Maven
+
+### Run
+
 ```bash
+# 1. Start infrastructure
+docker-compose up -d
+
+# 2. Start Account Service
+cd account-service
+./mvnw spring-boot:run
+
+# 3. Start Transaction Service (separate terminal)
+cd transaction-service
 ./mvnw spring-boot:run
 ```
 
-Application starts on `http://localhost:8081`
+| Service | URL |
+|---|---|
+| Account Service | http://localhost:8081 |
+| Transaction Service | http://localhost:8082 |
+| Kafka UI | http://localhost:8090 |
 
-## 📡 API Endpoints
+---
 
-### Account Management
+## API Response Format
 
-| Method | Endpoint | Description |
-|---|---|---|
-| POST | `/api/v1/accounts` | Create new account |
-| GET | `/api/v1/accounts` | Get all accounts |
-| GET | `/api/v1/accounts/{id}` | Get account by ID |
-| GET | `/api/v1/accounts/number/{no}` | Get by account number |
-| GET | `/api/v1/accounts/status/{status}` | Filter by status |
-| POST | `/api/v1/accounts/{id}/deposit` | Deposit money |
-| POST | `/api/v1/accounts/{id}/withdraw` | Withdraw money |
-| PATCH | `/api/v1/accounts/{id}/status` | Update status |
-| DELETE | `/api/v1/accounts/{id}` | Close account |
+All endpoints return a consistent envelope:
 
-### Health Check
-GET http://localhost:8081/actuator/health
-
-## 📨 Sample API Calls
-
-### Create Account
-```bash
-curl -X POST http://localhost:8081/api/v1/accounts \
-  -H "Content-Type: application/json" \
-  -d '{
-    "accountHolderName": "Shiva Kumar",
-    "email": "shiva@bankflow.com",
-    "phoneNumber": "9876543210",
-    "accountType": "SAVINGS",
-    "initialDeposit": 5000
-  }'
-```
-
-### Response
 ```json
 {
   "success": true,
-  "message": "Account created successfully",
-  "data": {
-    "id": "39cc812e-e476-4296-b279-fc5abe8dbc29",
-    "accountNumber": "BF20260000001001",
-    "accountHolderName": "Shiva Kumar",
-    "email": "shiva@bankflow.com",
-    "balance": 5000,
-    "accountType": "SAVINGS",
-    "status": "ACTIVE"
-  },
-  "timestamp": "2026-04-20T18:37:28.73"
+  "message": "Operation successful",
+  "data": {},
+  "timestamp": "2024-12-19T10:30:45.123456"
 }
 ```
 
-### Deposit Money
-```bash
-curl -X POST http://localhost:8081/api/v1/accounts/{id}/deposit \
-  -H "Content-Type: application/json" \
-  -d '{
-    "amount": 2000,
-    "remarks": "Salary credit"
-  }'
-```
+---
 
-## 🎯 Design Patterns Used
+## Key Design Decisions
 
-| Pattern | Where Applied |
+| Pattern | Where |
 |---|---|
-| Repository Pattern | Data access layer |
-| Service Layer Pattern | Business logic separation |
-| DTO Pattern | API request/response objects |
-| Builder Pattern | Object construction (Lombok) |
-| Observer Pattern | Kafka event publishing |
-| Factory Pattern | Credit score providers |
-| Singleton | Spring Beans |
-| Strategy Pattern | CIBIL vs CRIF providers |
-
-## 🔑 Key Design Decisions
-
-### Why Microservices?
-Each service scales independently. Transaction service handles 10x more traffic than Account service — scale only what needs scaling.
-
-### Why Kafka over REST for inter-service communication?
-Kafka decouples services — if Notification service is down, messages wait in Kafka and are processed when it recovers. REST would fail immediately.
-
-### Why PostgreSQL for Account Service?
-Banking requires ACID compliance. PostgreSQL provides strong consistency and supports row-level locking for concurrent transactions.
-
-### Why Optimistic Locking?
-Account reads far outnumber writes. Optimistic locking via `@Version` prevents lost updates without holding DB locks — better performance at scale.
-
-## 📊 Kafka Topics
-
-| Topic | Producers | Consumers | Purpose |
-|---|---|---|---|
-| account-events | Account Service | Transaction, Notification | Account lifecycle events |
-| transaction-events | Transaction Service | Notification Service | Transaction records |
-| notification-events | Transaction Service | Notification Service | Alert triggers |
-
-## 🔍 Monitoring
-
-```bash
-# Health check
-curl http://localhost:8081/actuator/health
-
-# Metrics
-curl http://localhost:8081/actuator/metrics
-
-# Kafka UI Dashboard
-open http://localhost:8090
-```
-
-## 🧪 Running Tests
-```bash
-./mvnw test
-```
-
-## 📈 Future Roadmap
-
-- [ ] KYC Service (Aadhaar masking, PAN verification)
-- [ ] CIBIL/CRIF credit score integration
-- [ ] Loan Generation System
-- [ ] Spring AI + RAG pipeline
-- [ ] React frontend dashboard
-- [ ] Kubernetes deployment manifests
-- [ ] GitHub Actions CI/CD pipeline
-
-## 👨‍💻 Author
-
-**Shiva Kumar**
-- Built as a demonstration of senior-level Java microservices architecture
-- Covers: Spring Boot, Kafka, PostgreSQL, Docker, JWT, Design Patterns, SOLID Principles
-
-## 📝 License
-MIT License
+| Event-driven (Kafka pub/sub) | Inter-service communication — no direct HTTP calls between services |
+| Optimistic locking (`@Version`) | `Account` entity — prevents concurrent balance corruption |
+| Soft delete | Accounts are marked `CLOSED`, never hard-deleted |
+| Java Records for DTOs | `AccountResponse`, `TransactionResponse` — immutable by default |
+| Separate databases per service | PostgreSQL for accounts, MySQL for transactions — service isolation |
